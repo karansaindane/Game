@@ -41,7 +41,7 @@ function publicRoom(room, playerId) {
   const me = room.players.find(p => p.id === playerId);
   const players = room.players.map(p => ({ id: p.id, name: p.name, connected: p.connected, host: p.id === room.hostId, spectator: !!p.spectator, submitted: room.submissions.has(p.id), voted: room.votes.has(p.id) }));
   const answers = room.phase === 'vote' || room.phase === 'reveal' || room.phase === 'score' || room.phase === 'finished'
-    ? room.answerOrder.map(id => ({ id, text: room.submissions.get(id)?.text || '', author: room.phase === 'vote' ? null : room.submissions.get(id)?.name || 'Player', votes: [...room.votes.values()].filter(v => v === id).length })) : [];
+    ? room.answerOrder.map(id => { const answer = [...room.submissions.values()].find(a => a.id === id); return { id, text: answer?.text || '', own: answer?.playerId === playerId, author: room.phase === 'vote' ? null : answer?.name || 'Player', votes: [...room.votes.values()].filter(v => v === id).length }; }) : [];
   const voters = room.phase === 'vote' ? [...room.votes.keys()] : [];
   return { code: room.code, phase: room.phase, round: room.round, prompt: room.prompt, deadline: room.deadline, players, me: me ? { id: me.id, name: me.name } : null, answers, myVote: room.votes.get(playerId) || null, scores: room.players.map(p => ({ id: p.id, name: p.name, score: room.scores.get(p.id) || 0 })).sort((a,b) => b.score-a.score || a.name.localeCompare(b.name)), answered: room.submissions.size, voted: room.votes.size, voters, winnerIds: room.winnerIds || [], error: room.error || null };
 }
@@ -52,7 +52,7 @@ function beginRound(room) {
 function transition(room) {
   if (room.phase === 'answer') {
     // Players who missed the answer still get to see and vote on the answers that arrived.
-    room.answerOrder = [...room.submissions.keys()];
+    room.answerOrder = [...room.submissions.values()].map(answer => answer.id);
     for (let i = room.answerOrder.length - 1; i > 0; i--) { const j = randomInt(i + 1); [room.answerOrder[i], room.answerOrder[j]] = [room.answerOrder[j], room.answerOrder[i]]; }
     room.phase = 'vote'; room.deadline = Date.now() + timers.vote * 1000;
     if (room.answerOrder.length === 0) finishVoting(room);
@@ -67,7 +67,7 @@ function transition(room) {
   }
 }
 function finishVoting(room) {
-  for (const [answerId] of room.submissions) room.scores.set(room.submissions.get(answerId).playerId, (room.scores.get(room.submissions.get(answerId).playerId) || 0) + [...room.votes.values()].filter(v => v === answerId).length);
+  for (const [playerId, answer] of room.submissions) room.scores.set(playerId, (room.scores.get(playerId) || 0) + [...room.votes.values()].filter(v => v === answer.id).length);
   room.phase = 'reveal'; room.deadline = Date.now() + timers.reveal * 1000;
 }
 setInterval(() => { for (const room of rooms.values()) {
@@ -120,13 +120,14 @@ const server = http.createServer(async (req,res) => {
       if(room.phase!=='answer') return fail(res,'The answer round has ended.');
       if(room.submissions.has(player.id)) return fail(res,'Your answer is already locked in.');
       const text=String(data.text||'').trim().replace(/\s+/g,' ').slice(0,100); if(!text) return fail(res,'Write a short answer first.');
-      room.submissions.set(player.id,{id:player.id,playerId:player.id,name:player.name,text});
+      room.submissions.set(player.id,{id:randomUUID(),playerId:player.id,name:player.name,text});
       if(room.submissions.size>=room.players.filter(p=>p.connected).length) { room.deadline=Math.min(room.deadline,Date.now()+900); }
     } else if(action==='vote') {
       if(player.spectator) return fail(res,'You joined during the game. Play when the host starts the next game.');
       if(room.phase!=='vote') return fail(res,'Voting is closed.');
       if(room.votes.has(player.id)) return fail(res,'Your vote is already locked in.');
-      if(!room.submissions.has(data.answerId)) return fail(res,'That answer is not available.');
+      const answer=[...room.submissions.values()].find(a=>a.id===data.answerId); if(!answer) return fail(res,'That answer is not available.');
+      if(answer.playerId===player.id) return fail(res,'Choose another player’s answer. Your own answer cannot receive your vote.');
       room.votes.set(player.id,data.answerId);
       if(room.votes.size>=room.players.filter(p=>p.connected).length) room.deadline=Math.min(room.deadline,Date.now()+900);
     } else if(action==='new-game') {
